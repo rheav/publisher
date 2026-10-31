@@ -5,7 +5,7 @@ Instância pessoal do TryPost v2.0.0 (VPS/EasyPanel, projeto `my-projects`, serv
 ## Operar via MCP (servidor `TryPost`, escopo de usuário do Claude Code)
 
 - Comece por `list-social-accounts-tool` (canais) e `list-content-types-tool` (regras de mídia, limites de texto e `meta` por rede). Nunca escolha `content_type` sem consultar.
-- Horários nas tools são **UTC**. O usuário está em `America/Sao_Paulo` (UTC-3): "9h" = `12:00Z`.
+- Horários nas tools são **UTC**. Os 3 canais estão em `America/New_York` (fuso das contas, sem meta semanal nem horários de fila, por decisão do usuário em 2026-10-31); o usuário mora em `America/Sao_Paulo`. Quando ele disser "9h", perguntar se é horário de NY (do público) ou de SP, a menos que já tenha dito.
 - Fila: `list-free-slots-tool` → `create-post-tool` com `queue`/`queue_slot`. Horário fixo: `scheduled_at`.
 - Mídia: `request-media-upload-tool` (URL assinada, 15 min, uso único) ou `attach-media-from-url-tool` (URL pública direta, sem redirect). Upload vale 24 h e por post.
 - Instagram (conforme `docs/trypost/platforms/instagram.md`): só Business/Creator. `instagram_feed` = 1 a 10 imagens/vídeos (carrossel é feed com várias mídias; imagem 8 MB, proporção 3:4 a 1.91:1; vídeo 100 MB, 60 s). `instagram_reel` = 1 vídeo MP4/MOV, 300 MB, 15 min. `instagram_story` = 1 mídia, 24 h, sem legenda (texto não é enviado). Máx. 5 hashtags. GIF não. Limite da Meta: 100 posts/dia por conta. Canais são `instagram` (Instagram Login); música em Reel só existe via `instagram-facebook`.
