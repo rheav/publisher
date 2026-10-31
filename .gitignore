@@ -1,3 +1,4 @@
 .env.production
 oauth-*.key
 .superpowers/
+docs/trypost/
