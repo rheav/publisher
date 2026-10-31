@@ -18,7 +18,7 @@
 | Imagem | build própria, não `ghcr.io/trypostit/trypost` | a publicada grava `VITE_REVERB_HOST=localhost:8080`; WebSocket não funcionaria no domínio. |
 | Onde buildar | GitHub Actions (amd64) | Mac sem Docker (e é arm64); VPS tem 3,7 GB livres e 16 containers, build de PHP+Vite lá é risco. |
 | Pacote GHCR | público | só contém código AGPL público + chave pública do Reverb; evita credencial de registry na VPS. |
-| DNS | A `publisher.rheav.dev` → `23.94.0.233`, **proxied (nuvem laranja)** | o firewall da VPS (`DOCKER-USER`) só aceita 80/443 vindo dos IPs da Cloudflare; DNS-only não responde. Zona em SSL "Full", origem com o cert self-signed do EasyPanel. Custo: upload pela UI limitado a 100 MB (Cloudflare free); vídeo maior entra por URL/Drive. |
+| DNS | A `publisher.rheav.dev` → `<IP da VPS>`, **proxied (nuvem laranja)** | o firewall da VPS (`DOCKER-USER`) só aceita 80/443 vindo dos IPs da Cloudflare; DNS-only não responde. Zona em SSL "Full", origem com o cert self-signed do EasyPanel. Custo: upload pela UI limitado a 100 MB (Cloudflare free); vídeo maior entra por URL/Drive. |
 | Mídia | `FILESYSTEM_DISK=public`, volume em `/var/www/html/storage/app` | Meta baixa a mídia por URL pública `https://publisher.rheav.dev/storage/...`. R2 fica como upgrade futuro. |
 | E-mail | `MAIL_MAILER=log` | uso solo, sem convites nem reset de senha por e-mail. |
 | Banco/Redis | serviços próprios no projeto `publisher` | isolamento; Postgres alpine ocioso ~40 MB, Redis ~5 MB. |
@@ -28,7 +28,7 @@
 
 ## Global Constraints
 
-- Domínio: `publisher.rheav.dev`. VPS: `ssh vps` (`root@23.94.0.233`), sandbox desligado. Zona Cloudflare `rheav.dev` id `dc7e200cec2f2d4033c81d32c4084b53`, conta `abe911c210914d7ecc30d9521176c495`.
+- Domínio: `publisher.rheav.dev`. VPS: alias `ssh vps`, sandbox desligado. Zona Cloudflare `rheav.dev` id `dc7e200cec2f2d4033c81d32c4084b53`, conta `abe911c210914d7ecc30d9521176c495`.
 - Imagem: `ghcr.io/rheav/trypost:v2.0.0` e `:latest`, `linux/amd64`, target `production`, build args `VITE_REVERB_APP_KEY=publisher-reverb-key VITE_REVERB_HOST=publisher.rheav.dev VITE_REVERB_PORT=443 VITE_REVERB_SCHEME=https`.
 - Segredos (APP_KEY, chaves Passport, senhas de DB/Redis, REVERB_APP_SECRET, INSTAGRAM_CLIENT_SECRET) só no env do EasyPanel e na cópia local `~/Code/apps/publisher/.env.production` (gitignored). Nunca no repo.
 - Repo `rheav/publisher` (público) guarda só workflow + docs. Commits sem atribuição a Claude. Push só quando o usuário pedir.
@@ -37,7 +37,7 @@
 
 ## Review Focus
 
-1. **Upload de Reel > 100 MB**: só funciona com DNS-only. Teste da Task 3 confirma nuvem cinza; Task 5 confirma `client_max_body_size 1G` respondendo (upload de 150 MB via UI é o teste manual final).
+1. **Upload de Reel > 100 MB** atrás do proxy da Cloudflare (limite de 100 MB por request no plano free). Inferido pelo revisor, não medido: a UI envia em pedaços de 5 MB (`resources/js/utils/chunkedUpload.ts`), então o limite provavelmente não se aplica. Teste manual final: subir um vídeo de 150 MB pela UI.
 2. **URLs geradas em `http://` atrás do Traefik** (assets quebrados, callback OAuth não bate): `TRUSTED_PROXIES=*`. Task 5 verifica que `/up` e a página de login carregam sem mixed content e que o callback mostrado em Configurações → Canais é `https://`.
 3. **Container reinicia em loop** por falta de `PASSPORT_PRIVATE_KEY` ou `APP_KEY`: entrypoint sai com erro. Task 5 lê o log e exige a linha `[entrypoint] ready — handing off to supervisord`.
 4. **WebSocket morto** (chave do bundle ≠ `REVERB_APP_KEY` do env, ou Traefik sem upgrade): Task 5 verifica `wss://publisher.rheav.dev/app/publisher-reverb-key` respondendo 101.
@@ -170,13 +170,13 @@ awk 'NF {printf "%s\\n", $0}' oauth-private.key
 ### Task 3: DNS na Cloudflare
 
 **Interfaces:**
-- Produces: `publisher.rheav.dev` resolvendo para `23.94.0.233`, sem proxy.
+- Produces: `publisher.rheav.dev` atrás do proxy da Cloudflare (o firewall da VPS só aceita 80/443 dos IPs da Cloudflare).
 
 - [ ] **Step 1: Criar o registro** via MCP `cloudflare-api` `execute`:
 
 ```js
 cloudflare.request({ method: "POST", path: "/zones/dc7e200cec2f2d4033c81d32c4084b53/dns_records",
-  body: { type: "A", name: "publisher", content: "23.94.0.233", proxied: false, ttl: 1, comment: "TryPost (EasyPanel)" } })
+  body: { type: "A", name: "publisher", content: "<IP da VPS>", proxied: true, ttl: 1, comment: "TryPost (EasyPanel)" } })
 ```
 
 - [ ] **Step 2: Verificar**
@@ -184,7 +184,7 @@ cloudflare.request({ method: "POST", path: "/zones/dc7e200cec2f2d4033c81d32c4084
 ```bash
 dig +short publisher.rheav.dev A
 ```
-Esperado: exatamente `23.94.0.233` (um IP da Cloudflare aqui = proxy ligado = errado).
+Esperado: dois IPs da Cloudflare (104.21.x / 172.67.x). O IP da VPS direto = proxy desligado = site inacessível pelo firewall.
 
 ---
 
