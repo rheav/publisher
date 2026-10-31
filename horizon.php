@@ -319,15 +319,15 @@ return [
 
     'environments' => [
         'production' => [
-            // publisher.rheav.dev: VPS compartilhada com pouca RAM. Sem balance=auto
-            // (que mantém 1 worker por fila) e com poucos processos por supervisor.
-            'supervisor-1' => ['balance' => 'simple', 'maxProcesses' => 2],
-            'social-publishing' => ['balance' => 'simple', 'maxProcesses' => 2],
-            'webhooks' => ['balance' => 'simple', 'maxProcesses' => 1],
-            'analytics' => ['balance' => 'simple', 'maxProcesses' => 1],
-            'media-imports' => ['balance' => 'simple', 'maxProcesses' => 1],
-            'media-adoption' => ['balance' => 'simple', 'maxProcesses' => 1],
-            'rss-feeds' => ['balance' => 'simple', 'maxProcesses' => 1],
+            // publisher.rheav.dev: VPS compartilhada com pouca RAM. balance=false
+            // (auto e simple mantêm 1 worker por fila) e com poucos processos por supervisor.
+            'supervisor-1' => ['balance' => false, 'maxProcesses' => 2],
+            'social-publishing' => ['balance' => false, 'maxProcesses' => 2],
+            'webhooks' => ['balance' => false, 'maxProcesses' => 1],
+            'analytics' => ['balance' => false, 'maxProcesses' => 1],
+            'media-imports' => ['balance' => false, 'maxProcesses' => 1],
+            'media-adoption' => ['balance' => false, 'maxProcesses' => 1],
+            'rss-feeds' => ['balance' => false, 'maxProcesses' => 1],
         ],
 
         'local' => [
