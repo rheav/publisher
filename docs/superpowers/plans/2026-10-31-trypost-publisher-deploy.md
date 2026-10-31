@@ -4,7 +4,7 @@
 
 **Goal:** TryPost v2.0.0 rodando na VPS (EasyPanel) em `https://publisher.rheav.dev`, com várias contas de Instagram conectadas via API oficial da Meta, uso pessoal.
 
-**Architecture:** Imagem própria do TryPost (mesmo Dockerfile upstream, target `production`) buildada no GitHub Actions com o domínio do WebSocket gravado no bundle, publicada em `ghcr.io/rheav/trypost`. Na VPS, um projeto EasyPanel `publisher` com 3 serviços: `db` (Postgres), `redis`, `app` (a imagem). Traefik do EasyPanel termina TLS e encaminha tudo para a porta 80 do `app`; o nginx interno já faz proxy de `/app/` e `/apps/` para o Reverb, então um único domínio e uma única porta bastam.
+**Architecture:** Imagem própria do TryPost (mesmo Dockerfile upstream, target `production`) buildada no GitHub Actions com o domínio do WebSocket gravado no bundle, publicada em `ghcr.io/rheav/trypost`. Na VPS, no projeto EasyPanel `my-projects`, 3 serviços: `publisher-db` (Postgres), `publisher-redis`, `publisher` (a imagem). Traefik do EasyPanel termina TLS e encaminha tudo para a porta 80 do `app`; o nginx interno já faz proxy de `/app/` e `/apps/` para o Reverb, então um único domínio e uma única porta bastam.
 
 **Tech Stack:** TryPost v2.0.0 (Laravel 13, Vue, Horizon, Reverb), Postgres 16, Redis 7, EasyPanel (Docker Swarm + Traefik 3), GitHub Actions + GHCR, Cloudflare DNS, Meta "Instagram API with Instagram Login".
 
@@ -33,7 +33,7 @@
 - Segredos (APP_KEY, chaves Passport, senhas de DB/Redis, REVERB_APP_SECRET, INSTAGRAM_CLIENT_SECRET) só no env do EasyPanel e na cópia local `~/Code/apps/publisher/.env.production` (gitignored). Nunca no repo.
 - Repo `rheav/publisher` (público) guarda só workflow + docs. Commits sem atribuição a Claude. Push só quando o usuário pedir.
 - Depois de qualquer deploy: não monitorar. Verificar uma vez, com comando explícito.
-- Hostnames internos do EasyPanel: `<projeto>_<serviço>` → `publisher_db`, `publisher_redis`.
+- Projeto EasyPanel: `my-projects` (o plano free limita a 3 projetos e os 3 já existem). Serviços `publisher-db`, `publisher-redis`, `publisher`. Hostnames internos `<projeto>_<serviço>` → `my-projects_publisher-db`, `my-projects_publisher-redis`. Swarm: `my-projects_publisher`.
 
 ## Review Focus
 
@@ -192,7 +192,7 @@ Esperado: exatamente `23.94.0.233` (um IP da Cloudflare aqui = proxy ligado = er
 
 **Interfaces:**
 - Consumes: imagem (Task 1), segredos (Task 2), DNS (Task 3), token da API do EasyPanel (usuário gera em `https://easypanel.rheav.dev` → Settings → API Tokens e cola no chat; fica só na sessão, não em arquivo).
-- Produces: serviços `publisher_db`, `publisher_redis`, `publisher_app`; domínio `publisher.rheav.dev` → `app:80` com HTTPS.
+- Produces: serviços `publisher_db`, `publisher_redis`, `my-projects_publisher`; domínio `publisher.rheav.dev` → `app:80` com HTTPS.
 
 Chamadas tRPC: `POST https://easypanel.rheav.dev/api/trpc/<método>` com `Authorization: Bearer <token>` e body `{"json": {...}}`. Nomes esperados: `projects.createProject`, `services.postgres.createService`, `services.redis.createService`, `services.app.createService`, `services.app.updateSourceImage`, `services.app.updateEnv`, `services.app.updateMounts`, `services.app.updateResources`, `domains.createDomain`, `services.app.deployService`. Se algum nome falhar com 404, confirmar pelo painel (aba Network do navegador ao fazer a ação à mão) antes de insistir. Fallback aceitável: criar pelo painel com os valores exatos abaixo.
 
@@ -226,13 +226,13 @@ LOG_CHANNEL=stderr
 LOG_LEVEL=info
 
 DB_CONNECTION=pgsql
-DB_HOST=publisher_db
+DB_HOST=my-projects_publisher-db
 DB_PORT=5432
 DB_DATABASE=<do inspectService>
 DB_USERNAME=<do inspectService>
 DB_PASSWORD=<Task 2>
 
-REDIS_HOST=publisher_redis
+REDIS_HOST=my-projects_publisher-redis
 REDIS_PORT=6379
 REDIS_PASSWORD=<Task 2>
 QUEUE_CONNECTION=redis
@@ -274,7 +274,7 @@ CHANGELOG_ENABLED=true
 - [ ] **Step 1: Log do entrypoint**
 
 ```bash
-ssh vps 'docker service logs publisher_app --tail 60 2>&1 | grep -E "\[entrypoint\]|ERROR|error"'
+ssh vps 'docker service logs my-projects_publisher --tail 60 2>&1 | grep -E "\[entrypoint\]|ERROR|error"'
 ```
 Esperado: `running migrations` … `ready — handing off to supervisord`. Sem `PASSPORT_PRIVATE_KEY and PASSPORT_PUBLIC_KEY must be set`.
 
@@ -333,7 +333,7 @@ curl -sI "https://publisher.rheav.dev/storage/<caminho>" | head -1
 ```
 Esperado: `HTTP/2 200`. Depois o post aparece como publicado e existe no Instagram. Log da fila:
 ```bash
-ssh vps 'docker service logs publisher_app --tail 100 2>&1 | grep -iE "instagram|failed"'
+ssh vps 'docker service logs my-projects_publisher --tail 100 2>&1 | grep -iE "instagram|failed"'
 ```
 
 - [ ] **Step 7: Tag.** No repo `publisher`, `git tag -a v0.1.0 -m "TryPost 2.0.0 live em publisher.rheav.dev"` (esquema de versão a confirmar com o usuário).
