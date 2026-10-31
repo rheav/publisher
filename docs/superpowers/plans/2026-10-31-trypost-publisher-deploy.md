@@ -18,7 +18,7 @@
 | Imagem | build própria, não `ghcr.io/trypostit/trypost` | a publicada grava `VITE_REVERB_HOST=localhost:8080`; WebSocket não funcionaria no domínio. |
 | Onde buildar | GitHub Actions (amd64) | Mac sem Docker (e é arm64); VPS tem 3,7 GB livres e 16 containers, build de PHP+Vite lá é risco. |
 | Pacote GHCR | público | só contém código AGPL público + chave pública do Reverb; evita credencial de registry na VPS. |
-| DNS | A `publisher.rheav.dev` → `23.94.0.233`, **DNS only (nuvem cinza)** | proxy da Cloudflare corta upload em 100 MB; Reels passam disso. Traefik emite o certificado. |
+| DNS | A `publisher.rheav.dev` → `23.94.0.233`, **proxied (nuvem laranja)** | o firewall da VPS (`DOCKER-USER`) só aceita 80/443 vindo dos IPs da Cloudflare; DNS-only não responde. Zona em SSL "Full", origem com o cert self-signed do EasyPanel. Custo: upload pela UI limitado a 100 MB (Cloudflare free); vídeo maior entra por URL/Drive. |
 | Mídia | `FILESYSTEM_DISK=public`, volume em `/var/www/html/storage/app` | Meta baixa a mídia por URL pública `https://publisher.rheav.dev/storage/...`. R2 fica como upgrade futuro. |
 | E-mail | `MAIL_MAILER=log` | uso solo, sem convites nem reset de senha por e-mail. |
 | Banco/Redis | serviços próprios no projeto `publisher` | isolamento; Postgres alpine ocioso ~40 MB, Redis ~5 MB. |
@@ -289,13 +289,17 @@ Esperado: `HTTP/2 200` nos dois (login sem redirect para `http://`).
 - [ ] **Step 3: WebSocket**
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" "https://publisher.rheav.dev/app/publisher-reverb-key?protocol=7&client=js&version=8"
+curl -s --http1.1 -o /dev/null -w "%{http_code}\n" -H "Connection: Upgrade" -H "Upgrade: websocket" -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" "https://publisher.rheav.dev/app/publisher-reverb-key?protocol=7&client=js&version=8"
 ```
-Esperado: `101`.
+Esperado: `101`. Obrigatório `--http1.1`: em HTTP/2 o curl descarta `Connection/Upgrade` e o Reverb devolve 500 (não é bug do servidor).
 
-- [ ] **Step 4: Cadastro** (usuário, no navegador): `https://publisher.rheav.dev/register`. Depois em Configurações: fuso `America/Sao_Paulo`, idioma pt-BR.
+- [ ] **Step 4: Primeiro usuário.** `/register` dá 404 de propósito no self-hosted (exige convite). Criar com o seeder, uma vez:
+```bash
+ssh vps 'docker exec $(docker ps -q -f name=my-projects_publisher.1 | head -1) php artisan db:seed --class="Database\\Seeders\\UserSeeder" --force'
+```
+Cria `admin@trypost.it` / `password`. Usuário entra, troca e-mail e senha em Configurações, fuso `America/Sao_Paulo`, idioma pt-BR.
 
-- [ ] **Step 5: RAM**
+- [ ] **Step 5: RAM.** Horizon em `production` com `balance=auto|simple` mantém 1 worker por fila (25 workers, 1,8 GB). `config/horizon.php` com `balance=false` montado como arquivo pelo EasyPanel (cópia em `horizon.php` na raiz do repo).
 
 ```bash
 ssh vps 'docker stats --no-stream --format "{{.Name}}\t{{.MemUsage}}" | grep publisher'
