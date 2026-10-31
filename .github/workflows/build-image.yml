@@ -1,0 +1,42 @@
+name: Build TryPost image
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: tag do trypostit/trypost
+        default: v2.0.0
+        required: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: trypostit/trypost
+          ref: ${{ inputs.ref }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: production
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/rheav/trypost:${{ inputs.ref }}
+            ghcr.io/rheav/trypost:latest
+          build-args: |
+            VITE_REVERB_APP_KEY=publisher-reverb-key
+            VITE_REVERB_HOST=publisher.rheav.dev
+            VITE_REVERB_PORT=443
+            VITE_REVERB_SCHEME=https
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
