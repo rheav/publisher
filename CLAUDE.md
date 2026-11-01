@@ -19,5 +19,5 @@ Instância pessoal do TryPost v2.0.0 (VPS/EasyPanel, projeto `my-projects`, serv
 ## Infra
 
 - Deploy/env pelo EasyPanel (API REST em `/api/<op>`; token é pedido ao usuário, não fica em arquivo).
-- Segredos só em `.env.production` (gitignored). Imagem buildada por `.github/workflows/build-image.yml`; atualizar = bump do `ref` → run → trocar tag no EasyPanel → deploy. Antes: `pg_dump` e diff do `horizon.php` com o upstream.
+- Segredos só em `.env.production` (gitignored). Imagem buildada por `.github/workflows/build-image.yml`; atualizar = bump do `ref` → run → trocar tag no EasyPanel → deploy. Patches locais em `patches/` entram no build e a tag ganha sufixo `-r1` (ver README). Antes: `pg_dump` e diff do `horizon.php` com o upstream.
 - Após deploy: não monitorar; uma verificação única (`/up` 200, log do entrypoint "ready").
