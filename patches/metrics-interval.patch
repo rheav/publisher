@@ -1,0 +1,96 @@
+diff --git a/.env.example b/.env.example
+index 09e2b91..573bb37 100644
+--- a/.env.example
++++ b/.env.example
+@@ -385,6 +385,8 @@ PUBLICATION_DISCOVERY_INTERVAL_HOURS=3
+ X_PUBLICATION_DISCOVERY_INTERVAL_HOURS=24
+ # Hours read back from the newest post already seen on each check.
+ PUBLICATION_DISCOVERY_OVERLAP_HOURS=6
++# How often (in hours, 1-24) post metrics are refreshed. Below 24 the day's snapshot is re-read on every run.
++PUBLICATION_METRICS_INTERVAL_HOURS=24
+ 
+ # RSS feeds (Create › Feeds)
+ # RSS_FEEDS_POLL_INTERVAL_MINUTES=480
+diff --git a/app/Console/Commands/Analytics/DispatchPublicationMetrics.php b/app/Console/Commands/Analytics/DispatchPublicationMetrics.php
+index 874794b..0fad81f 100644
+--- a/app/Console/Commands/Analytics/DispatchPublicationMetrics.php
++++ b/app/Console/Commands/Analytics/DispatchPublicationMetrics.php
+@@ -16,7 +16,7 @@
+ use Illuminate\Console\Command;
+ use Illuminate\Database\Eloquent\Builder;
+ 
+-#[Signature('analytics:dispatch-publication-metrics')]
++#[Signature('analytics:dispatch-publication-metrics {--refresh-same-day : Read again the posts that already have a snapshot for today}')]
+ #[Description('Dispatch daily publication metric collection for eligible accounts')]
+ class DispatchPublicationMetrics extends Command
+ {
+@@ -52,6 +52,7 @@ public function handle(): int
+                         $publication->id,
+                         $now->toDateString(),
+                         $publication->provider_published_at->lessThan($windowStart),
++                        (bool) $this->option('refresh-same-day'),
+                     ));
+             });
+ 
+diff --git a/config/trypost.php b/config/trypost.php
+index a682d06..a45246e 100644
+--- a/config/trypost.php
++++ b/config/trypost.php
+@@ -217,6 +217,7 @@
+     'analytics' => [
+         'discovery_interval_hours' => (int) env('PUBLICATION_DISCOVERY_INTERVAL_HOURS', 3),
+         'x_discovery_interval_hours' => (int) env('X_PUBLICATION_DISCOVERY_INTERVAL_HOURS', 24),
++        'metrics_interval_hours' => (int) env('PUBLICATION_METRICS_INTERVAL_HOURS', 24),
+         'discovery_overlap_hours' => (int) env('PUBLICATION_DISCOVERY_OVERLAP_HOURS', 6),
+     ],
+ 
+diff --git a/routes/console.php b/routes/console.php
+index d594bb0..4c55c5a 100644
+--- a/routes/console.php
++++ b/routes/console.php
+@@ -49,8 +49,9 @@
+     ->timezone('UTC')
+     ->withoutOverlapping()
+     ->onOneServer();
+-Schedule::command(DispatchPublicationMetrics::class)
+-    ->dailyAt('03:00')
++$metricsHours = (int) config('trypost.analytics.metrics_interval_hours');
++Schedule::command(DispatchPublicationMetrics::class, $metricsHours < 24 ? ['--refresh-same-day'] : [])
++    ->cron($metricsHours < 24 ? DiscoverySchedule::cron($metricsHours) : '0 3 * * *')
+     ->timezone('UTC')
+     ->withoutOverlapping()
+     ->onOneServer();
+diff --git a/tests/Feature/Analytics/AnalyticsScheduleTest.php b/tests/Feature/Analytics/AnalyticsScheduleTest.php
+index 58e67dc..ad821d7 100644
+--- a/tests/Feature/Analytics/AnalyticsScheduleTest.php
++++ b/tests/Feature/Analytics/AnalyticsScheduleTest.php
+@@ -26,6 +26,7 @@
+         ->and($xDiscovery->expression)->toBe('0 */24 * * *')
+         ->and($xDiscovery->mutexName())->not->toBe($discovery->mutexName())
+         ->and($metrics->expression)->toBe('0 3 * * *')
++        ->and((string) $metrics->command)->not->toContain('--refresh-same-day')
+         ->and($command('analytics:backfill-existing'))->toBeNull();
+ 
+     foreach ([$collection, $finalizer, $recovery, $discovery, $xDiscovery, $metrics] as $event) {
+diff --git a/tests/Feature/Analytics/PublicationMetricsJobsTest.php b/tests/Feature/Analytics/PublicationMetricsJobsTest.php
+index 4232ec0..e326567 100644
+--- a/tests/Feature/Analytics/PublicationMetricsJobsTest.php
++++ b/tests/Feature/Analytics/PublicationMetricsJobsTest.php
+@@ -277,6 +277,17 @@ function discoveredFor(AnalyticsPublication $publication): DiscoveredPublication
+         ->pluck('publicationId')->unique())->toHaveCount(22);
+ });
+ 
++test('the dispatcher passes the same-day refresh flag to every metric job', function () {
++    $date = CarbonImmutable::parse('2026-09-23 12:00:00', 'UTC');
++    CarbonImmutable::setTestNow($date);
++    metricJobPublication(Platform::TikTok, $date->subDay());
++    Bus::fake([CollectPublicationMetrics::class]);
++
++    $this->artisan('analytics:dispatch-publication-metrics', ['--refresh-same-day' => true])->assertSuccessful();
++
++    Bus::assertDispatched(CollectPublicationMetrics::class, fn (CollectPublicationMetrics $job): bool => $job->refreshSameDay);
++});
++
+ test('an old publication with an unsuccessful baseline is retried by the next daily dispatch', function () {
+     CarbonImmutable::setTestNow('2026-09-23 12:00:00 UTC');
+     $publication = metricJobPublication(Platform::Mastodon, CarbonImmutable::now('UTC')->subDays(180));
