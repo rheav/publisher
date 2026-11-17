@@ -1,0 +1,1125 @@
+diff --git a/app/Actions/Media/StoreReelCover.php b/app/Actions/Media/StoreReelCover.php
+new file mode 100644
+index 0000000..ba96dcf
+--- /dev/null
++++ b/app/Actions/Media/StoreReelCover.php
+@@ -0,0 +1,45 @@
++<?php
++
++declare(strict_types=1);
++
++namespace App\Actions\Media;
++
++use Illuminate\Http\UploadedFile;
++use Illuminate\Support\Facades\Storage;
++use Illuminate\Support\Str;
++use Intervention\Image\Drivers\Gd\Driver;
++use Intervention\Image\ImageManager;
++
++/**
++ * Stores an own reel cover (patch reel-cover-image) the way Meta takes it: a
++ * JPEG of at most 1080x1920 (scaled down, never cropped or upscaled) and 8 MB,
++ * in covers/, outside the media table, so the temporary-upload prune never
++ * deletes it before the post goes out. Returns its public url.
++ */
++class StoreReelCover
++{
++    public const int MAX_WIDTH = 1080;
++
++    public const int MAX_HEIGHT = 1920;
++
++    public const int MAX_BYTES = 8 * 1024 * 1024;
++
++    public static function execute(UploadedFile $file): string
++    {
++        $image = (new ImageManager(Driver::class))->decodePath((string) $file->getRealPath());
++        $image->scaleDown(self::MAX_WIDTH, self::MAX_HEIGHT);
++
++        // a 1080x1920 JPEG is well under 8 MB at 90; the steps down only guard a pathological image
++        for ($quality = 90; ; $quality -= 10) {
++            $jpeg = (string) $image->encodeUsingMediaType('image/jpeg', quality: $quality);
++            if (strlen($jpeg) <= self::MAX_BYTES || $quality <= 60) {
++                break;
++            }
++        }
++
++        $path = 'covers/'.Str::uuid().'.jpg';
++        Storage::put($path, $jpeg, 'public');
++
++        return Storage::url($path);
++    }
++}
+diff --git a/app/Actions/Media/SyncOwnedMedia.php b/app/Actions/Media/SyncOwnedMedia.php
+index 8606603..2562193 100644
+--- a/app/Actions/Media/SyncOwnedMedia.php
++++ b/app/Actions/Media/SyncOwnedMedia.php
+@@ -27,7 +27,7 @@ class SyncOwnedMedia
+     /**
+      * Per-owner edits an item may carry over the row's measured `meta`.
+      */
+-    public const array EDITABLE_META = ['alt_text', 'user_tags', 'cover_offset_ms'];
++    public const array EDITABLE_META = ['alt_text', 'user_tags', 'cover_offset_ms', 'cover_url'];
+ 
+     /**
+      * Row `meta` keys that only describe the row's history and stay off the item.
+diff --git a/app/Dto/MediaItem.php b/app/Dto/MediaItem.php
+index 1c8257e..746cd72 100644
+--- a/app/Dto/MediaItem.php
++++ b/app/Dto/MediaItem.php
+@@ -141,6 +141,17 @@ public function altText(): ?string
+     /**
+      * The frame, in milliseconds from the start, the user picked as this video's cover.
+      */
++    /**
++     * An own cover image for a reel (patch reel-cover-image): the address of a
++     * JPEG in this app's covers/ folder, sent to Instagram as `cover_url`.
++     */
++    public function coverUrl(): ?string
++    {
++        $url = data_get($this->meta, 'cover_url');
++
++        return is_string($url) && $url !== '' ? $url : null;
++    }
++
+     public function coverOffsetMs(): ?int
+     {
+         $offset = data_get($this->meta, 'cover_offset_ms');
+diff --git a/app/Http/Controllers/MediaCoverController.php b/app/Http/Controllers/MediaCoverController.php
+new file mode 100644
+index 0000000..72bfeb3
+--- /dev/null
++++ b/app/Http/Controllers/MediaCoverController.php
+@@ -0,0 +1,23 @@
++<?php
++
++declare(strict_types=1);
++
++namespace App\Http\Controllers;
++
++use App\Actions\Media\StoreReelCover;
++use Illuminate\Http\JsonResponse;
++use Illuminate\Http\Request;
++
++/**
++ * Uploads an own reel cover (patch reel-cover-image): the composer's Capa tab
++ * and the REST api both answer `{ url }`, the value of a video's meta.cover_url.
++ */
++class MediaCoverController extends Controller
++{
++    public function __invoke(Request $request): JsonResponse
++    {
++        $request->validate(['cover' => ['required', 'image', 'mimes:jpeg,png,webp', 'max:20480']]);
++
++        return response()->json(['url' => StoreReelCover::execute($request->file('cover'))], 201);
++    }
++}
+diff --git a/app/Mcp/Concerns/DescribesPostMedia.php b/app/Mcp/Concerns/DescribesPostMedia.php
+index 3205681..53d070c 100644
+--- a/app/Mcp/Concerns/DescribesPostMedia.php
++++ b/app/Mcp/Concerns/DescribesPostMedia.php
+@@ -21,7 +21,7 @@ protected function mediaSchema(JsonSchema $schema, string $description): ArrayTy
+                 'url' => $item->string()->description('Public http(s) URL that serves the file itself (a JPEG, PNG, GIF or WebP image, HEIC or HEIF when the server can convert it, an MP4 or MOV video, or a PDF; redirects are not followed and web pages are refused); downloaded once per call, within 20 seconds, up to the server limits (by default 10 MB and 67 megapixels for an image, 1 GB for a video, 100 MB for a PDF).'),
+                 'id' => $item->string()->description('UUID of a media item of this workspace, as returned in a post\'s media (get-post-tool, list-posts-tool); copied for the post. An id already on the post keeps it, so send the current ids in the new order to reorder, and leave one out to remove it.'),
+                 'alt' => $item->string()->description('Alt text for an image (ignored for video and PDF).'),
+-                'meta' => $item->object()->description('Per-item settings: alt_text (string, up to 2000 characters; cut to the network limit, alt_text_max_length in list-content-types-tool, when published), user_tags (Instagram feed images only: up to 20 of {username, x, y}, x and y between 0 and 1 from the top-left corner), cover_offset_ms (video cover frame in milliseconds, for content types with supports_video_cover).'),
++                'meta' => $item->object()->description('Per-item settings: alt_text (string, up to 2000 characters; cut to the network limit, alt_text_max_length in list-content-types-tool, when published), user_tags (Instagram feed images only: up to 20 of {username, x, y}, x and y between 0 and 1 from the top-left corner), cover_offset_ms (video cover frame in milliseconds, for content types with supports_video_cover), cover_url (an own cover image for an Instagram reel or single feed video: the url POST /api/media/covers returned; Instagram uses it over cover_offset_ms).'),
+             ]))
+             ->description("{$description} Items keep the order given (the first is the cover of a carousel). Each item gives exactly one of upload_token, url or id. A PDF must be the only attachment. Check the content type's media rules with list-content-types-tool.");
+     }
+diff --git a/app/Services/Social/InstagramPublisher.php b/app/Services/Social/InstagramPublisher.php
+index 319ada9..8cb3bb8 100644
+--- a/app/Services/Social/InstagramPublisher.php
++++ b/app/Services/Social/InstagramPublisher.php
+@@ -130,6 +130,7 @@ private function publishReel(string $instagramId, string $accessToken, ?string $
+             'media_type' => 'REELS',
+             'access_token' => $accessToken,
+             ...$this->thumbOffsetParam($media),
++            ...$this->coverUrlParam($media),
+             ...$this->sharedOptions(),
+             ...$this->reelOptions(),
+         ], 'reel container');
+@@ -270,6 +271,19 @@ private function reelOptions(): array
+         ];
+     }
+ 
++    /**
++     * An own cover image (patch reel-cover-image). Meta uses it over
++     * thumb_offset when both are sent, and only on reels.
++     *
++     * @return array{cover_url?: string}
++     */
++    private function coverUrlParam(MediaItem $media): array
++    {
++        $url = $media->coverUrl();
++
++        return $url === null ? [] : ['cover_url' => $url];
++    }
++
+     /**
+      * @return array{thumb_offset?: int}
+      */
+diff --git a/app/Support/PostMediaRules.php b/app/Support/PostMediaRules.php
+index 91552d6..a2d5513 100644
+--- a/app/Support/PostMediaRules.php
++++ b/app/Support/PostMediaRules.php
+@@ -6,6 +6,7 @@
+ 
+ use App\Enums\Media\Source;
+ use Closure;
++use Illuminate\Support\Facades\Storage;
+ use Illuminate\Validation\Rule;
+ 
+ /**
+@@ -94,9 +95,27 @@ private static function metaRules(): array
+             self::validateAltText(data_get($value, 'alt_text'), $fail);
+             self::validateUserTags(data_get($value, 'user_tags'), $fail);
+             self::validateCoverOffset(data_get($value, 'cover_offset_ms'), data_get($value, 'duration'), $fail);
++            self::validateCoverUrl(data_get($value, 'cover_url'), $fail);
+         }];
+     }
+ 
++    /**
++     * An own reel cover (patch reel-cover-image): only a file this app stored
++     * in covers/, so Meta only ever fetches our own images.
++     */
++    private static function validateCoverUrl(mixed $url, Closure $fail): void
++    {
++        if ($url === null) {
++            return;
++        }
++
++        $base = Storage::url('covers/');
++
++        if (! is_string($url) || ! str_starts_with($url, $base) || preg_match('/^[\w-]+\.jpg$/', substr($url, strlen($base))) !== 1) {
++            $fail('posts.errors.cover_url_invalid')->translate();
++        }
++    }
++
+     /**
+      * The video frame picked as the cover, in milliseconds. It cannot pass the
+      * end of the video when the item's measured duration (seconds) is known.
+diff --git a/lang/ar/posts.php b/lang/ar/posts.php
+index 3590713..d6f07ba 100644
+--- a/lang/ar/posts.php
++++ b/lang/ar/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'اختر صورة مصغرة',
+             'thumbnail_hint' => 'اسحب شريط التمرير لاختيار الإطار الذي يظهر كغلاف للفيديو.',
+             'thumbnail_value' => ':seconds ثانية',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'فيديو :number',
+             'thumbnail' => 'الصورة :number',
+             'cancel' => 'إلغاء',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'انتهت صلاحية هذا الرفع. أضف الملف مرة أخرى.',
+         'cover_offset_min' => 'يجب أن يكون وقت غلاف الفيديو 0 مللي ثانية أو أكثر.',
+         'cover_offset_max' => 'يجب ألا يتجاوز وقت غلاف الفيديو :max مللي ثانية.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'يحتاج كل عنصر وسائط إلى واحد فقط من upload_token أو url أو id.',
+         'media_url_unreachable' => 'تعذر جلب الوسائط من :url.',
+         'media_type_unsupported' => 'نوع هذا الملف غير مدعوم من قناة المنشور.',
+diff --git a/lang/de/posts.php b/lang/de/posts.php
+index 34fdd6f..ea674c9 100644
+--- a/lang/de/posts.php
++++ b/lang/de/posts.php
+@@ -247,6 +247,11 @@
+             'thumbnail_heading' => 'Vorschaubild auswählen',
+             'thumbnail_hint' => 'Ziehe den Regler, um das Bild auszuwählen, das als Titelbild des Videos angezeigt wird.',
+             'thumbnail_value' => ':seconds Sekunden',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Video :number',
+             'thumbnail' => 'Bild :number',
+             'cancel' => 'Abbrechen',
+@@ -802,6 +807,7 @@
+         'media_expired' => 'Dieser Upload ist abgelaufen. Füge die Datei erneut hinzu.',
+         'cover_offset_min' => 'Der Zeitpunkt des Titelbilds muss 0 ms oder mehr betragen.',
+         'cover_offset_max' => 'Der Zeitpunkt des Titelbilds darf höchstens :max ms betragen.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Jedes Medienelement braucht genau eines von upload_token, url oder id.',
+         'media_url_unreachable' => 'Medien konnten nicht von :url abgerufen werden.',
+         'media_type_unsupported' => 'Dieser Dateityp wird vom Kanal des Beitrags nicht unterstützt.',
+diff --git a/lang/el/posts.php b/lang/el/posts.php
+index 40a5fd5..c43e93d 100644
+--- a/lang/el/posts.php
++++ b/lang/el/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'Επιλέξτε μικρογραφία',
+             'thumbnail_hint' => 'Σύρετε το ρυθμιστικό για να επιλέξετε το καρέ που θα εμφανίζεται ως εξώφυλλο του βίντεο.',
+             'thumbnail_value' => ':seconds δευτερόλεπτα',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Βίντεο :number',
+             'thumbnail' => 'Εικόνα :number',
+             'cancel' => 'Ακύρωση',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'Αυτή η μεταφόρτωση έληξε. Προσθέστε ξανά το αρχείο.',
+         'cover_offset_min' => 'Ο χρόνος του εξωφύλλου του βίντεο πρέπει να είναι 0 ms ή περισσότερο.',
+         'cover_offset_max' => 'Ο χρόνος του εξωφύλλου του βίντεο πρέπει να είναι έως :max ms.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Κάθε στοιχείο πολυμέσων χρειάζεται ακριβώς ένα από τα upload_token, url ή id.',
+         'media_url_unreachable' => 'Δεν ήταν δυνατή η λήψη πολυμέσων από το :url.',
+         'media_type_unsupported' => 'Αυτός ο τύπος αρχείου δεν υποστηρίζεται από το κανάλι της δημοσίευσης.',
+diff --git a/lang/en/posts.php b/lang/en/posts.php
+index d469dee..d733b34 100644
+--- a/lang/en/posts.php
++++ b/lang/en/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'Choose a thumbnail',
+             'thumbnail_hint' => 'Drag the slider to pick the frame shown as the video\'s cover.',
+             'thumbnail_value' => ':seconds seconds',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Video :number',
+             'thumbnail' => 'Image :number',
+             'cancel' => 'Cancel',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'This upload expired. Add the file again.',
+         'cover_offset_min' => 'The video cover time must be 0 ms or more.',
+         'cover_offset_max' => 'The video cover time must be :max ms or less.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Each media item needs exactly one of upload_token, url or id.',
+         'media_url_unreachable' => 'Could not fetch media from :url.',
+         'media_type_unsupported' => 'This file type is not supported by the post\'s channel.',
+diff --git a/lang/es/posts.php b/lang/es/posts.php
+index a699ac9..749ab54 100644
+--- a/lang/es/posts.php
++++ b/lang/es/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'Elige una miniatura',
+             'thumbnail_hint' => 'Arrastra el control para elegir el fotograma que se mostrará como portada del vídeo.',
+             'thumbnail_value' => ':seconds segundos',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Vídeo :number',
+             'thumbnail' => 'Imagen :number',
+             'cancel' => 'Cancelar',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'Esta subida caducó. Añade el archivo de nuevo.',
+         'cover_offset_min' => 'El tiempo de la portada del vídeo debe ser de 0 ms o más.',
+         'cover_offset_max' => 'El tiempo de la portada del vídeo debe ser de :max ms o menos.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Cada elemento multimedia necesita exactamente uno de upload_token, url o id.',
+         'media_url_unreachable' => 'No se pudo obtener el archivo de :url.',
+         'media_type_unsupported' => 'Este tipo de archivo no es compatible con el canal de la publicación.',
+diff --git a/lang/fr/posts.php b/lang/fr/posts.php
+index 721c604..e20cc1a 100644
+--- a/lang/fr/posts.php
++++ b/lang/fr/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'Choisissez une miniature',
+             'thumbnail_hint' => 'Faites glisser le curseur pour choisir l\'image affichée comme couverture de la vidéo.',
+             'thumbnail_value' => ':seconds secondes',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Vidéo :number',
+             'thumbnail' => 'Image :number',
+             'cancel' => 'Annuler',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'Ce téléversement a expiré. Ajoutez à nouveau le fichier.',
+         'cover_offset_min' => 'Le temps de la couverture de la vidéo doit être de 0 ms ou plus.',
+         'cover_offset_max' => 'Le temps de la couverture de la vidéo doit être de :max ms ou moins.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Chaque média doit avoir exactement un seul de ces champs : upload_token, url ou id.',
+         'media_url_unreachable' => 'Impossible de récupérer le média depuis :url.',
+         'media_type_unsupported' => 'Ce type de fichier n\'est pas pris en charge par le canal de la publication.',
+diff --git a/lang/it/posts.php b/lang/it/posts.php
+index 4a48423..9eed496 100644
+--- a/lang/it/posts.php
++++ b/lang/it/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'Scegli una miniatura',
+             'thumbnail_hint' => 'Trascina il cursore per scegliere il fotogramma mostrato come copertina del video.',
+             'thumbnail_value' => ':seconds secondi',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Video :number',
+             'thumbnail' => 'Immagine :number',
+             'cancel' => 'Annulla',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'Questo caricamento è scaduto. Aggiungi di nuovo il file.',
+         'cover_offset_min' => 'Il tempo della copertina del video deve essere di 0 ms o più.',
+         'cover_offset_max' => 'Il tempo della copertina del video deve essere di :max ms o meno.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Ogni elemento multimediale richiede esattamente uno tra upload_token, url o id.',
+         'media_url_unreachable' => 'Impossibile recuperare il contenuto multimediale da :url.',
+         'media_type_unsupported' => 'Questo tipo di file non è supportato dal canale del post.',
+diff --git a/lang/ja/posts.php b/lang/ja/posts.php
+index 5b76c79..5e21f48 100644
+--- a/lang/ja/posts.php
++++ b/lang/ja/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'サムネイルを選択',
+             'thumbnail_hint' => 'スライダーをドラッグして、動画のカバーとして表示するフレームを選んでください。',
+             'thumbnail_value' => ':seconds 秒',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => '動画 :number',
+             'thumbnail' => '画像 :number',
+             'cancel' => 'キャンセル',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'このアップロードは期限切れです。ファイルをもう一度追加してください。',
+         'cover_offset_min' => '動画カバーの時間は 0 ms 以上にしてください。',
+         'cover_offset_max' => '動画カバーの時間は :max ms 以下にしてください。',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => '各メディア項目には、upload_token、url、id のいずれか1つだけを指定してください。',
+         'media_url_unreachable' => ':url からメディアを取得できませんでした。',
+         'media_type_unsupported' => 'このファイル形式は、投稿のチャンネルでサポートされていません。',
+diff --git a/lang/ko/posts.php b/lang/ko/posts.php
+index bc3b612..f3c7388 100644
+--- a/lang/ko/posts.php
++++ b/lang/ko/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => '썸네일 선택',
+             'thumbnail_hint' => '슬라이더를 끌어 동영상 커버로 표시할 프레임을 선택하세요.',
+             'thumbnail_value' => ':seconds초',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => '동영상 :number',
+             'thumbnail' => '이미지 :number',
+             'cancel' => '취소',
+@@ -800,6 +805,7 @@
+         'media_expired' => '이 업로드는 만료되었습니다. 파일을 다시 추가하세요.',
+         'cover_offset_min' => '동영상 커버 시간은 0ms 이상이어야 합니다.',
+         'cover_offset_max' => '동영상 커버 시간은 :max ms 이하여야 합니다.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => '각 미디어 항목에는 upload_token, url, id 중 정확히 하나가 필요합니다.',
+         'media_url_unreachable' => ':url에서 미디어를 가져올 수 없습니다.',
+         'media_type_unsupported' => '이 파일 형식은 게시물의 채널에서 지원되지 않습니다.',
+diff --git a/lang/nl/posts.php b/lang/nl/posts.php
+index 6616a1e..477bcf4 100644
+--- a/lang/nl/posts.php
++++ b/lang/nl/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'Kies een miniatuur',
+             'thumbnail_hint' => 'Sleep de schuifregelaar om het beeld te kiezen dat als omslag van de video wordt getoond.',
+             'thumbnail_value' => ':seconds seconden',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Video :number',
+             'thumbnail' => 'Afbeelding :number',
+             'cancel' => 'Annuleren',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'Deze upload is verlopen. Voeg het bestand opnieuw toe.',
+         'cover_offset_min' => 'Het tijdstip van de video-omslag moet 0 ms of meer zijn.',
+         'cover_offset_max' => 'Het tijdstip van de video-omslag mag maximaal :max ms zijn.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Elk media-item heeft precies één van upload_token, url of id nodig.',
+         'media_url_unreachable' => 'Media kon niet worden opgehaald van :url.',
+         'media_type_unsupported' => 'Dit bestandstype wordt niet ondersteund door het kanaal van de post.',
+diff --git a/lang/pl/posts.php b/lang/pl/posts.php
+index 24374ca..b6e72bd 100644
+--- a/lang/pl/posts.php
++++ b/lang/pl/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'Wybierz miniaturę',
+             'thumbnail_hint' => 'Przeciągnij suwak, aby wybrać klatkę wyświetlaną jako okładka filmu.',
+             'thumbnail_value' => ':seconds s',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Film :number',
+             'thumbnail' => 'Zdjęcie :number',
+             'cancel' => 'Anuluj',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'Ten przesłany plik wygasł. Dodaj plik ponownie.',
+         'cover_offset_min' => 'Czas okładki filmu musi wynosić 0 ms lub więcej.',
+         'cover_offset_max' => 'Czas okładki filmu może wynosić najwyżej :max ms.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Każdy element multimedialny wymaga dokładnie jednego z pól: upload_token, url lub id.',
+         'media_url_unreachable' => 'Nie udało się pobrać multimediów z :url.',
+         'media_type_unsupported' => 'Ten typ pliku nie jest obsługiwany przez kanał posta.',
+diff --git a/lang/pt-BR/posts.php b/lang/pt-BR/posts.php
+index 7d6856c..f588ff6 100644
+--- a/lang/pt-BR/posts.php
++++ b/lang/pt-BR/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'Escolha uma miniatura',
+             'thumbnail_hint' => 'Arraste o controle para escolher o quadro exibido como capa do vídeo.',
+             'thumbnail_value' => ':seconds segundos',
++            'cover_image_label' => 'Imagem própria',
++            'cover_image_hint' => 'Vale para o Instagram. Sem imagem, vale o segundo escolhido acima.',
++            'cover_image_choose' => 'Escolher imagem',
++            'cover_image_remove' => 'Remover',
++            'cover_image_failed' => 'Não deu para enviar a imagem.',
+             'video_thumbnail' => 'Vídeo :number',
+             'thumbnail' => 'Imagem :number',
+             'cancel' => 'Cancelar',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'Este envio expirou. Adicione o arquivo novamente.',
+         'cover_offset_min' => 'O tempo da capa do vídeo deve ser de 0 ms ou mais.',
+         'cover_offset_max' => 'O tempo da capa do vídeo deve ser de :max ms ou menos.',
++        'cover_url_invalid' => 'A capa precisa ser uma imagem enviada pelo TryPost.',
+         'media_item_shape' => 'Cada item de mídia precisa de exatamente um entre upload_token, url ou id.',
+         'media_url_unreachable' => 'Não foi possível buscar a mídia em :url.',
+         'media_type_unsupported' => 'Este tipo de arquivo não é compatível com o canal do post.',
+diff --git a/lang/ru/posts.php b/lang/ru/posts.php
+index 7c0d0b9..cf614e6 100644
+--- a/lang/ru/posts.php
++++ b/lang/ru/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'Выберите обложку',
+             'thumbnail_hint' => 'Перетащите ползунок, чтобы выбрать кадр, который будет обложкой видео.',
+             'thumbnail_value' => ':seconds с',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Видео :number',
+             'thumbnail' => 'Изображение :number',
+             'cancel' => 'Отмена',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'Срок действия этой загрузки истёк. Добавьте файл ещё раз.',
+         'cover_offset_min' => 'Время обложки видео должно быть не меньше 0 мс.',
+         'cover_offset_max' => 'Время обложки видео должно быть не больше :max мс.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Каждому медиафайлу нужно ровно одно из полей: upload_token, url или id.',
+         'media_url_unreachable' => 'Не удалось получить медиафайл по адресу :url.',
+         'media_type_unsupported' => 'Этот тип файла не поддерживается каналом публикации.',
+diff --git a/lang/tr/posts.php b/lang/tr/posts.php
+index d45bd2a..ec19ef9 100644
+--- a/lang/tr/posts.php
++++ b/lang/tr/posts.php
+@@ -247,6 +247,11 @@
+             'thumbnail_heading' => 'Küçük resim seçin',
+             'thumbnail_hint' => 'Videonun kapağı olarak gösterilecek kareyi seçmek için kaydırıcıyı sürükleyin.',
+             'thumbnail_value' => ':seconds saniye',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Video :number',
+             'thumbnail' => 'Görsel :number',
+             'cancel' => 'İptal',
+@@ -802,6 +807,7 @@
+         'media_expired' => 'Bu yüklemenin süresi doldu. Dosyayı yeniden ekleyin.',
+         'cover_offset_min' => 'Video kapağı zamanı 0 ms veya daha fazla olmalıdır.',
+         'cover_offset_max' => 'Video kapağı zamanı en fazla :max ms olabilir.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Her medya öğesi upload_token, url veya id alanlarından tam olarak birini içermelidir.',
+         'media_url_unreachable' => 'Medya :url adresinden alınamadı.',
+         'media_type_unsupported' => 'Bu dosya türü, gönderinin kanalı tarafından desteklenmiyor.',
+diff --git a/lang/uk/posts.php b/lang/uk/posts.php
+index 4783f34..2c6436b 100644
+--- a/lang/uk/posts.php
++++ b/lang/uk/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => 'Виберіть обкладинку',
+             'thumbnail_hint' => 'Перетягніть повзунок, щоб вибрати кадр, який буде обкладинкою відео.',
+             'thumbnail_value' => ':seconds с',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => 'Відео :number',
+             'thumbnail' => 'Зображення :number',
+             'cancel' => 'Скасувати',
+@@ -800,6 +805,7 @@
+         'media_expired' => 'Термін дії цього завантаження минув. Додайте файл ще раз.',
+         'cover_offset_min' => 'Час обкладинки відео має бути не менше 0 мс.',
+         'cover_offset_max' => 'Час обкладинки відео має бути не більше :max мс.',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => 'Кожному медіафайлу потрібне рівно одне з полів: upload_token, url або id.',
+         'media_url_unreachable' => 'Не вдалося отримати медіафайл за адресою :url.',
+         'media_type_unsupported' => 'Цей тип файлу не підтримується каналом публікації.',
+diff --git a/lang/zh/posts.php b/lang/zh/posts.php
+index 4de091b..f8ee3f8 100644
+--- a/lang/zh/posts.php
++++ b/lang/zh/posts.php
+@@ -245,6 +245,11 @@
+             'thumbnail_heading' => '选择缩略图',
+             'thumbnail_hint' => '拖动滑块，选择用作视频封面的画面。',
+             'thumbnail_value' => ':seconds 秒',
++            'cover_image_label' => 'Own image',
++            'cover_image_hint' => 'Used by Instagram. Without one, the frame chosen above is the cover.',
++            'cover_image_choose' => 'Choose image',
++            'cover_image_remove' => 'Remove',
++            'cover_image_failed' => 'The image could not be uploaded.',
+             'video_thumbnail' => '视频 :number',
+             'thumbnail' => '图片 :number',
+             'cancel' => '取消',
+@@ -800,6 +805,7 @@
+         'media_expired' => '此上传已过期。请重新添加文件。',
+         'cover_offset_min' => '视频封面时间必须不小于 0 毫秒。',
+         'cover_offset_max' => '视频封面时间不能超过 :max 毫秒。',
++        'cover_url_invalid' => 'The cover must be an image uploaded to TryPost.',
+         'media_item_shape' => '每个媒体项必须且只能提供 upload_token、url 或 id 中的一个。',
+         'media_url_unreachable' => '无法从 :url 获取媒体。',
+         'media_type_unsupported' => '帖子的频道不支持此文件类型。',
+diff --git a/resources/js/components/posts/composer/MediaEditorDialog.vue b/resources/js/components/posts/composer/MediaEditorDialog.vue
+index b12617d..930e20a 100644
+--- a/resources/js/components/posts/composer/MediaEditorDialog.vue
++++ b/resources/js/components/posts/composer/MediaEditorDialog.vue
+@@ -48,6 +48,7 @@ export type MediaEditChange = {
+     altText: string | null;
+     userTags: MediaUserTag[];
+     coverOffsetMs: number | null;
++    coverUrl: string | null;
+ };
+ 
+ const props = withDefaults(
+@@ -267,6 +268,7 @@ const apply = async (): Promise<void> => {
+                         altText: itemEdit.altText.trim() || null,
+                         userTags: itemEdit.userTags,
+                         coverOffsetMs: itemEdit.coverOffsetMs,
++                        coverUrl: itemEdit.coverUrl,
+                     };
+                 },
+             ),
+diff --git a/resources/js/components/posts/composer/MediaEditorThumbnailPanel.vue b/resources/js/components/posts/composer/MediaEditorThumbnailPanel.vue
+index 82bcd7a..4ae2464 100644
+--- a/resources/js/components/posts/composer/MediaEditorThumbnailPanel.vue
++++ b/resources/js/components/posts/composer/MediaEditorThumbnailPanel.vue
+@@ -1,8 +1,10 @@
+ <script setup lang="ts">
+-import { computed } from 'vue';
++import { computed, ref } from 'vue';
+ 
++import { Button } from '@/components/ui/button';
+ import { formatCoverOffset, type MediaEdit } from '@/lib/mediaEditor';
+ import { rangeFill } from '@/lib/rangeFill';
++import { store as storeCover } from '@/routes/app/media/covers';
+ 
+ const props = defineProps<{
+     duration: number | null;
+@@ -19,6 +21,41 @@ const seconds = computed({
+         edit.value.coverOffsetMs = Math.round(value * 1000);
+     },
+ });
++
++// An own cover image (patch reel-cover-image): uploaded at once, its url kept in the edit until Apply.
++const fileInput = ref<HTMLInputElement | null>(null);
++const uploading = ref(false);
++const failed = ref(false);
++const upload = async (event: Event) => {
++    const input = event.target as HTMLInputElement;
++    const file = input.files?.[0];
++    input.value = '';
++    if (!file) return;
++    uploading.value = true;
++    failed.value = false;
++    try {
++        const body = new FormData();
++        body.append('cover', file);
++        const response = await fetch(storeCover.url(), {
++            method: 'POST',
++            body,
++            credentials: 'same-origin',
++            headers: {
++                Accept: 'application/json',
++                'X-CSRF-TOKEN':
++                    document.querySelector<HTMLMetaElement>(
++                        'meta[name="csrf-token"]',
++                    )?.content ?? '',
++            },
++        });
++        if (!response.ok) throw new Error(String(response.status));
++        edit.value.coverUrl = ((await response.json()) as { url: string }).url;
++    } catch {
++        failed.value = true;
++    } finally {
++        uploading.value = false;
++    }
++};
+ </script>
+ 
+ <template>
+@@ -58,5 +95,54 @@ const seconds = computed({
+                 class="editor-range w-full"
+             />
+         </label>
++        <div class="space-y-2 border-t pt-3">
++            <div class="space-y-1">
++                <span class="text-sm">{{
++                    $t('posts.composer.media_editor.cover_image_label')
++                }}</span>
++                <p class="text-xs text-muted-foreground">
++                    {{ $t('posts.composer.media_editor.cover_image_hint') }}
++                </p>
++            </div>
++            <img
++                v-if="edit.coverUrl"
++                :src="edit.coverUrl"
++                alt=""
++                data-testid="media-editor-cover-image-preview"
++                class="aspect-[9/16] w-24 rounded-md object-cover"
++            />
++            <input
++                ref="fileInput"
++                type="file"
++                accept="image/jpeg,image/png,image/webp"
++                class="sr-only"
++                data-testid="media-editor-cover-image"
++                @change="upload"
++            />
++            <div class="flex items-center gap-2">
++                <Button
++                    type="button"
++                    variant="outline"
++                    size="sm"
++                    :disabled="uploading"
++                    @click="fileInput?.click()"
++                >
++                    {{ $t('posts.composer.media_editor.cover_image_choose') }}
++                </Button>
++                <Button
++                    v-if="edit.coverUrl"
++                    type="button"
++                    variant="ghost"
++                    size="sm"
++                    data-testid="media-editor-cover-image-remove"
++                    @click="edit.coverUrl = null"
++                >
++                    {{ $t('posts.composer.media_editor.cover_image_remove') }}
++                </Button>
++            </div>
++            <p v-if="failed" class="text-xs text-destructive">
++                {{ $t('posts.composer.media_editor.cover_image_failed') }}
++            </p>
++        </div>
+     </div>
+ </template>
+diff --git a/resources/js/composables/useMediaEditSwap.ts b/resources/js/composables/useMediaEditSwap.ts
+index 68e1280..e1a011f 100644
+--- a/resources/js/composables/useMediaEditSwap.ts
++++ b/resources/js/composables/useMediaEditSwap.ts
+@@ -13,6 +13,7 @@ const editedMeta = (
+     delete next.alt_text;
+     delete next.user_tags;
+     delete next.cover_offset_ms;
++    delete next.cover_url;
+ 
+     return {
+         ...next,
+@@ -24,6 +25,7 @@ const editedMeta = (
+         ...(change.coverOffsetMs !== null
+             ? { cover_offset_ms: change.coverOffsetMs }
+             : {}),
++        ...(change.coverUrl ? { cover_url: change.coverUrl } : {}),
+     };
+ };
+ 
+diff --git a/resources/js/lib/mediaEditor.ts b/resources/js/lib/mediaEditor.ts
+index 4895917..ef27c74 100644
+--- a/resources/js/lib/mediaEditor.ts
++++ b/resources/js/lib/mediaEditor.ts
+@@ -67,6 +67,8 @@ export type MediaEdit = {
+     altText: string;
+     userTags: MediaUserTag[];
+     coverOffsetMs: number | null;
++    /** An own cover image (patch reel-cover-image): its url, or null. */
++    coverUrl: string | null;
+ };
+ 
+ export const USER_TAGS_MAX = 20;
+@@ -172,6 +174,7 @@ export const blankMediaEdit = (
+     altText: '',
+     userTags: [],
+     coverOffsetMs: null,
++    coverUrl: null,
+ });
+ 
+ export const createMediaEdit = (item: MediaItem): MediaEdit => ({
+@@ -179,6 +182,7 @@ export const createMediaEdit = (item: MediaItem): MediaEdit => ({
+     altText: item.meta?.alt_text ?? '',
+     userTags: [...(item.meta?.user_tags ?? [])],
+     coverOffsetMs: item.meta?.cover_offset_ms ?? null,
++    coverUrl: item.meta?.cover_url ?? null,
+ });
+ 
+ export const hasPixelChanges = (edit: MediaEdit): boolean =>
+@@ -195,7 +199,8 @@ export const hasMetaChanges = (edit: MediaEdit, item: MediaItem): boolean =>
+     edit.altText.trim() !== (item.meta?.alt_text ?? '').trim() ||
+     JSON.stringify(edit.userTags) !==
+         JSON.stringify(item.meta?.user_tags ?? []) ||
+-    (edit.coverOffsetMs ?? 0) !== (item.meta?.cover_offset_ms ?? 0);
++    (edit.coverOffsetMs ?? 0) !== (item.meta?.cover_offset_ms ?? 0) ||
++    (edit.coverUrl ?? '') !== (item.meta?.cover_url ?? '');
+ 
+ /** A cover offset in milliseconds as `m:ss.s`. */
+ export const formatCoverOffset = (milliseconds: number): string => {
+diff --git a/resources/js/types/media.ts b/resources/js/types/media.ts
+index 91d9767..9c6b6db 100644
+--- a/resources/js/types/media.ts
++++ b/resources/js/types/media.ts
+@@ -29,6 +29,8 @@ export interface MediaItem {
+         alt_text?: string;
+         user_tags?: MediaUserTag[];
+         cover_offset_ms?: number;
++        /** an own reel cover image (patch reel-cover-image), from POST media/covers */
++        cover_url?: string;
+         source?: MediaSource;
+         source_meta?: Record<string, SourceMetaValue>;
+     };
+diff --git a/routes/api.php b/routes/api.php
+index 330c7e5..f72e5b1 100644
+--- a/routes/api.php
++++ b/routes/api.php
+@@ -21,6 +21,7 @@
+ use App\Http\Controllers\Api\UploadController;
+ use App\Http\Controllers\Api\WebhookController;
+ use App\Http\Controllers\Api\WorkspaceController;
++use App\Http\Controllers\MediaCoverController;
+ use Illuminate\Support\Facades\Route;
+ 
+ Route::post('/uploads/{token}', [UploadController::class, 'store'])
+@@ -45,6 +46,7 @@
+     Route::patch('/posts/{post}/recurrence', [PostRecurrenceController::class, 'update'])->name('api.posts.recurrence.update');
+     Route::delete('/posts/{post}/recurrence', [PostRecurrenceController::class, 'destroy'])->name('api.posts.recurrence.destroy');
+     Route::post('/posts/{post}/media', [PostController::class, 'storeMedia'])->name('api.posts.store-media');
++    Route::post('/media/covers', MediaCoverController::class)->name('api.media.covers.store');
+     Route::post('/posts/{post}/media/from-upload', [PostController::class, 'attachMediaFromUpload'])->name('api.posts.attach-media-from-upload');
+     Route::post('/posts/{post}/media/from-url', [PostController::class, 'attachMediaFromUrl'])->name('api.posts.attach-media-from-url');
+     Route::get('/posts/{post}/metrics', [PostController::class, 'metrics'])->name('api.posts.metrics');
+diff --git a/routes/app.php b/routes/app.php
+index d9083f9..52b03d5 100644
+--- a/routes/app.php
++++ b/routes/app.php
+@@ -70,6 +70,7 @@
+ use App\Http\Controllers\Auth\XController;
+ use App\Http\Controllers\Auth\YouTubeController;
+ use App\Http\Controllers\FaviconController;
++use App\Http\Controllers\MediaCoverController;
+ use App\Http\Middleware\App\EnsureAccountReady;
+ use App\Http\Middleware\App\EnsureHasWorkspace;
+ use App\Support\TemplateLibrary;
+@@ -265,6 +266,7 @@
+     Route::delete('settings/workspace/signatures/{signature}', [WorkspaceSignatureController::class, 'destroy'])->name('app.signatures.destroy');
+ 
+     Route::post('media/chunked', [MediaUploadController::class, 'storeChunked'])->name('app.media.store-chunked');
++    Route::post('media/covers', MediaCoverController::class)->name('app.media.covers.store');
+     Route::get('media/{media}/file', [MediaFileController::class, 'show'])->whereUuid('media')->name('app.media.file');
+     Route::post('media/from-url', [MediaUploadController::class, 'storeFromUrl'])
+         ->middleware('throttle:media-imports')
+diff --git a/tests/Feature/Media/ReelCoverUrlTest.php b/tests/Feature/Media/ReelCoverUrlTest.php
+new file mode 100644
+index 0000000..be47575
+--- /dev/null
++++ b/tests/Feature/Media/ReelCoverUrlTest.php
+@@ -0,0 +1,130 @@
++<?php
++
++declare(strict_types=1);
++
++use App\Dto\MediaItem;
++use App\Enums\Post\Status;
++use App\Enums\PostPlatform\ContentType;
++use App\Mcp\Servers\TryPostServer;
++use App\Mcp\Tools\Post\UpdatePostTool;
++use App\Models\Media;
++use App\Models\Post;
++use App\Models\SocialAccount;
++use App\Models\User;
++use App\Models\Workspace;
++use Illuminate\Support\Facades\Queue;
++use Illuminate\Support\Facades\Storage;
++
++// An own cover image for a reel (patch reel-cover-image): `meta.cover_url` on the video, only an address of this
++// app's `covers/` folder.
++
++beforeEach(function () {
++    Storage::fake();
++    Queue::fake();
++
++    $this->user = User::factory()->create();
++    $this->workspace = Workspace::factory()->create(['user_id' => $this->user->id]);
++    $this->workspace->members()->attach($this->user->id, membershipPivot('admin'));
++    $this->user->update(['current_workspace_id' => $this->workspace->id]);
++
++    $account = SocialAccount::factory()->instagram()->create(['workspace_id' => $this->workspace->id]);
++    $this->post = Post::factory()->forAccount($account, ContentType::InstagramReel)->create([
++        'user_id' => $this->user->id,
++        'status' => Status::Draft,
++        'scheduled_at' => null,
++    ]);
++    $this->video = Media::factory()->video()->ownedByPost($this->post)->stored()->create(['meta' => ['duration' => 10]]);
++    $this->post->update(['media' => [reelCoverItem($this->video, [])]]);
++    $this->cover = Storage::url('covers/a.jpg');
++});
++
++/**
++ * @param  array<string, mixed>  $edits
++ * @return array<string, mixed>
++ */
++function reelCoverItem(Media $video, array $edits): array
++{
++    return [
++        'id' => $video->id,
++        'path' => $video->path,
++        'url' => $video->url,
++        'type' => 'video',
++        'mime_type' => 'video/mp4',
++        'meta' => ['duration' => 10, ...$edits],
++    ];
++}
++
++/**
++ * @return array<string, string>
++ */
++function reelCoverApiHeaders(Workspace $workspace): array
++{
++    return ['Authorization' => 'Bearer '.createApiTestToken(['workspace' => $workspace])['plain_token']];
++}
++
++test('the web composer stores the cover url next to the cover frame', function () {
++    $this->actingAs($this->user)->put(route('app.posts.update', $this->post), [
++        'status' => 'draft',
++        'content' => 'hi',
++        'media' => [reelCoverItem($this->video, ['cover_offset_ms' => 1500, 'cover_url' => $this->cover])],
++    ])->assertSessionHasNoErrors();
++
++    expect($this->post->fresh()->media[0]['meta'])->toEqual(['duration' => 10, 'cover_offset_ms' => 1500, 'cover_url' => $this->cover]);
++});
++
++test('the rest api stores the cover url', function () {
++    $this->withHeaders(reelCoverApiHeaders($this->workspace))->putJson(route('api.posts.update', $this->post), [
++        'status' => 'draft',
++        'media' => [['id' => $this->video->id, 'meta' => ['cover_url' => $this->cover]]],
++    ])->assertOk();
++
++    expect(data_get($this->post->fresh()->media, '0.meta.cover_url'))->toBe($this->cover);
++});
++
++test('mcp stores the cover url', function () {
++    TryPostServer::actingAs($this->user)->tool(UpdatePostTool::class, [
++        'post_id' => $this->post->id,
++        'media' => [['id' => $this->video->id, 'meta' => ['cover_url' => $this->cover]]],
++    ])->assertHasNoErrors();
++
++    expect(data_get($this->post->fresh()->media, '0.meta.cover_url'))->toBe($this->cover);
++});
++
++test('a cover url outside this app covers folder is refused everywhere', function (string $url) {
++    $this->actingAs($this->user)->put(route('app.posts.update', $this->post), [
++        'status' => 'draft',
++        'content' => 'hi',
++        'media' => [reelCoverItem($this->video, ['cover_url' => $url])],
++    ])->assertSessionHasErrors(['media.0.meta' => 'The cover must be an image uploaded to TryPost.']);
++
++    $this->withHeaders(reelCoverApiHeaders($this->workspace))->putJson(route('api.posts.update', $this->post), [
++        'status' => 'draft',
++        'media' => [['id' => $this->video->id, 'meta' => ['cover_url' => $url]]],
++    ])->assertUnprocessable()->assertJsonValidationErrors(['media.0.meta' => 'The cover must be an image uploaded to TryPost.']);
++
++    TryPostServer::actingAs($this->user)->tool(UpdatePostTool::class, [
++        'post_id' => $this->post->id,
++        'media' => [['id' => $this->video->id, 'meta' => ['cover_url' => $url]]],
++    ])->assertHasErrors(['The cover must be an image uploaded to TryPost.']);
++
++    expect(data_get($this->post->fresh()->media, '0.meta.cover_url'))->toBeNull();
++})->with([
++    'another host' => ['https://evil.example/covers/x.jpg'],
++    'another folder of this app' => [fn () => Storage::url('medias/x.jpg')],
++    'a path walking out of covers' => [fn () => Storage::url('covers/../medias/x.jpg')],
++]);
++
++test('a duplicated post keeps the cover url', function () {
++    $this->post->update(['media' => [reelCoverItem($this->video, ['cover_url' => $this->cover])]]);
++
++    $this->actingAs($this->user)->post(route('app.posts.duplicate', $this->post))->assertRedirect();
++
++    $copy = Post::whereKeyNot($this->post->id)->sole();
++    expect(data_get($copy->media, '0.meta.cover_url'))->toBe($this->cover);
++});
++
++test('the media item reads its cover url', function () {
++    expect(MediaItem::fromArray(['meta' => ['cover_url' => '/storage/covers/a.jpg']])->coverUrl())->toBe('/storage/covers/a.jpg')
++        ->and(MediaItem::fromArray(['meta' => ['cover_url' => '']])->coverUrl())->toBeNull()
++        ->and(MediaItem::fromArray(['meta' => []])->coverUrl())->toBeNull();
++});
+diff --git a/tests/Feature/Media/StoreReelCoverTest.php b/tests/Feature/Media/StoreReelCoverTest.php
+new file mode 100644
+index 0000000..0d7a968
+--- /dev/null
++++ b/tests/Feature/Media/StoreReelCoverTest.php
+@@ -0,0 +1,84 @@
++<?php
++
++declare(strict_types=1);
++
++use App\Models\User;
++use App\Models\Workspace;
++use Illuminate\Http\UploadedFile;
++use Illuminate\Support\Facades\Storage;
++
++// Uploading an own reel cover (patch reel-cover-image): a JPEG of at most 1080x1920 under covers/, its public url back.
++
++beforeEach(function () {
++    Storage::fake();
++
++    $this->user = User::factory()->create();
++    $this->workspace = Workspace::factory()->create(['user_id' => $this->user->id]);
++    $this->workspace->members()->attach($this->user->id, membershipPivot('admin'));
++    $this->user->update(['current_workspace_id' => $this->workspace->id]);
++});
++
++/**
++ * @return array{0: int, 1: int, 2: int} width, height, IMAGETYPE_*
++ */
++function storedCover(string $url): array
++{
++    $files = Storage::allFiles('covers');
++    expect($files)->toHaveCount(1)
++        ->and($files[0])->toEndWith('.jpg')
++        ->and($url)->toBe(Storage::url($files[0]));
++    [$width, $height, $type] = getimagesizefromstring(Storage::get($files[0]));
++
++    return [$width, $height, $type];
++}
++
++test('the composer uploads a cover: a big png becomes a 1080x1920 jpeg under covers/', function () {
++    $url = $this->actingAs($this->user)
++        ->postJson(route('app.media.covers.store'), ['cover' => UploadedFile::fake()->image('c.png', 2160, 3840)])
++        ->assertCreated()->json('url');
++
++    expect(storedCover($url))->toBe([1080, 1920, IMAGETYPE_JPEG]);
++});
++
++test('a small cover is kept at its size, never upscaled', function () {
++    $url = $this->actingAs($this->user)
++        ->postJson(route('app.media.covers.store'), ['cover' => UploadedFile::fake()->image('c.jpg', 600, 600)])
++        ->assertCreated()->json('url');
++
++    expect(storedCover($url))->toBe([600, 600, IMAGETYPE_JPEG]);
++});
++
++test('a webp cover wider than 9:16 is scaled down without cropping', function () {
++    $url = $this->actingAs($this->user)
++        ->postJson(route('app.media.covers.store'), ['cover' => UploadedFile::fake()->image('c.webp', 3000, 1500)])
++        ->assertCreated()->json('url');
++
++    expect(storedCover($url))->toBe([1080, 540, IMAGETYPE_JPEG]);
++});
++
++test('a file that is not an image is refused', function () {
++    $this->actingAs($this->user)
++        ->postJson(route('app.media.covers.store'), ['cover' => UploadedFile::fake()->create('c.pdf', 10, 'application/pdf')])
++        ->assertUnprocessable()->assertJsonValidationErrors('cover');
++
++    expect(Storage::allFiles('covers'))->toBe([]);
++});
++
++test('a guest cannot upload a cover', function () {
++    $this->postJson(route('app.media.covers.store'), ['cover' => UploadedFile::fake()->image('c.jpg', 100, 100)])
++        ->assertUnauthorized();
++    $this->postJson(route('api.media.covers.store'), ['cover' => UploadedFile::fake()->image('c.jpg', 100, 100)])
++        ->assertUnauthorized();
++
++    expect(Storage::allFiles('covers'))->toBe([]);
++});
++
++test('the rest api uploads a cover with a workspace token', function () {
++    $token = createApiTestToken(['workspace' => $this->workspace])['plain_token'];
++
++    $url = $this->withHeaders(['Authorization' => "Bearer {$token}"])
++        ->postJson(route('api.media.covers.store'), ['cover' => UploadedFile::fake()->image('c.png', 1080, 1920)])
++        ->assertCreated()->json('url');
++
++    expect(storedCover($url))->toBe([1080, 1920, IMAGETYPE_JPEG]);
++});
+diff --git a/tests/Feature/Services/Social/InstagramPublisherTest.php b/tests/Feature/Services/Social/InstagramPublisherTest.php
+index dd0a532..7d5ba0f 100644
+--- a/tests/Feature/Services/Social/InstagramPublisherTest.php
++++ b/tests/Feature/Services/Social/InstagramPublisherTest.php
+@@ -2531,3 +2531,65 @@ function instagramVideo(): array
+ 
+     Http::assertSent(fn (Request $request): bool => str_ends_with($request->url(), '/ig_123456789/media_publish'));
+ });
++
++// patch reel-cover-image: an own cover image goes as cover_url, next to the cover frame
++test('instagram reel and single feed video send cover_url when the video has one', function (ContentType $type) {
++    $cover = Storage::url('covers/a.jpg');
++    $this->post->update(['content_type' => $type]);
++    $this->post->update([
++        'media' => [[
++            'id' => 'test-media-video',
++            'path' => 'media/2026-01/test-video.mp4',
++            'url' => 'https://example.com/media/2026-01/test-video.mp4',
++            'mime_type' => 'video/mp4',
++            'original_filename' => 'test.mp4',
++            'meta' => ['duration' => 10, 'cover_offset_ms' => 1500, 'cover_url' => $cover],
++        ]],
++    ]);
++    $graph = Platform::Instagram->instagramGraphBaseUrl();
++
++    Http::fake([
++        "{$graph}/ig_123456789/media" => Http::response(['id' => 'container-123']),
++        "{$graph}/container-123*" => Http::response(['status_code' => 'FINISHED']),
++        "{$graph}/ig_123456789/media_publish" => Http::response(['id' => 'reel-123']),
++        "{$graph}/reel-123*" => Http::response(['permalink' => 'https://www.instagram.com/reel/ABC/']),
++    ]);
++
++    $this->publisher->publish($this->post);
++
++    Http::assertSent(fn (Request $request): bool => $request->url() === "{$graph}/ig_123456789/media"
++        && data_get($request->data(), 'media_type') === 'REELS'
++        && data_get($request->data(), 'cover_url') === $cover
++        && data_get($request->data(), 'thumb_offset') === 1500);
++})->with([
++    'reel' => [ContentType::InstagramReel],
++    'feed with one video' => [ContentType::InstagramFeed],
++]);
++
++test('instagram reel without a cover url sends no cover_url key', function () {
++    $this->post->update(['content_type' => ContentType::InstagramReel]);
++    $this->post->update([
++        'media' => [[
++            'id' => 'test-media-video',
++            'path' => 'media/2026-01/test-video.mp4',
++            'url' => 'https://example.com/media/2026-01/test-video.mp4',
++            'mime_type' => 'video/mp4',
++            'original_filename' => 'test.mp4',
++            'meta' => ['duration' => 10, 'cover_offset_ms' => 1500],
++        ]],
++    ]);
++    $graph = Platform::Instagram->instagramGraphBaseUrl();
++
++    Http::fake([
++        "{$graph}/ig_123456789/media" => Http::response(['id' => 'container-123']),
++        "{$graph}/container-123*" => Http::response(['status_code' => 'FINISHED']),
++        "{$graph}/ig_123456789/media_publish" => Http::response(['id' => 'reel-123']),
++        "{$graph}/reel-123*" => Http::response(['permalink' => 'https://www.instagram.com/reel/ABC/']),
++    ]);
++
++    $this->publisher->publish($this->post);
++
++    Http::assertSent(fn (Request $request): bool => $request->url() === "{$graph}/ig_123456789/media"
++        && ! array_key_exists('cover_url', $request->data())
++        && data_get($request->data(), 'thumb_offset') === 1500);
++});

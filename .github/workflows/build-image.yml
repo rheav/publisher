@@ -8,10 +8,55 @@ on:
         required: true
       suffix:
         description: sufixo da tag da imagem (patches locais em patches/)
-        default: -r1
+        default: -r2
         required: false
 jobs:
+  # the tests the local patches add or touch, on the patched upstream, before any image is built
+  tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: trypost_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: trypostit/trypost
+          ref: ${{ inputs.ref }}
+      - uses: actions/checkout@v4
+        with:
+          path: fork
+      - name: Apply local patches
+        run: for p in fork/patches/*.patch; do git apply --verbose "$p"; done
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, pdo_pgsql, bcmath, intl, gd, imagick
+          coverage: none
+      - name: Prepare Laravel
+        run: |
+          cp .env.ci .env
+          composer install --no-interaction --prefer-dist --optimize-autoloader
+          php artisan key:generate
+          php artisan migrate --force
+          php artisan passport:keys --force
+      - name: Patch tests
+        run: >-
+          ./vendor/bin/pest --compact
+          tests/Feature/Media/ReelCoverUrlTest.php
+          tests/Feature/Media/StoreReelCoverTest.php
+          tests/Feature/Media/VideoCoverOffsetTest.php
+          tests/Feature/Services/Social/InstagramPublisherTest.php
+          tests/Feature/Analytics/PublicationMetricsJobsTest.php
+          tests/Feature/LocalizationParityTest.php
   build:
+    needs: tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -21,8 +66,14 @@ jobs:
         with:
           repository: trypostit/trypost
           ref: ${{ inputs.ref }}
+      - uses: actions/checkout@v4
+        with:
+          path: fork
+      # every patch in patches/, in name order (metrics-interval, then reel-cover-image)
       - name: Apply local patches
-        run: curl -fsSL https://raw.githubusercontent.com/rheav/publisher/main/patches/metrics-interval.patch | git apply --verbose
+        run: |
+          for p in fork/patches/*.patch; do git apply --verbose "$p"; done
+          rm -rf fork
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
