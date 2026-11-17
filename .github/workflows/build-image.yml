@@ -14,6 +14,12 @@ jobs:
   # the tests the local patches add or touch, on the patched upstream, before any image is built
   tests:
     runs-on: ubuntu-latest
+    # upstream's .env.testing says DB_USERNAME=root; its own CI overrides the database this way
+    env:
+      DB_CONNECTION: pgsql
+      DB_DATABASE: trypost_test
+      DB_USERNAME: postgres
+      DB_PASSWORD: password
     services:
       postgres:
         image: postgres:16
