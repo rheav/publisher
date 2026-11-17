@@ -1,9 +1,9 @@
 diff --git a/app/Actions/Media/StoreReelCover.php b/app/Actions/Media/StoreReelCover.php
 new file mode 100644
-index 0000000..ba96dcf
+index 0000000..59c7bef
 --- /dev/null
 +++ b/app/Actions/Media/StoreReelCover.php
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,49 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -15,6 +15,7 @@ index 0000000..ba96dcf
 +use Illuminate\Support\Str;
 +use Intervention\Image\Drivers\Gd\Driver;
 +use Intervention\Image\ImageManager;
++use RuntimeException;
 +
 +/**
 + * Stores an own reel cover (patch reel-cover-image) the way Meta takes it: a
@@ -44,7 +45,10 @@ index 0000000..ba96dcf
 +        }
 +
 +        $path = 'covers/'.Str::uuid().'.jpg';
-+        Storage::put($path, $jpeg, 'public');
++        // the disk answers false instead of throwing: never hand back the url of a file that is not there
++        if (! Storage::put($path, $jpeg, 'public')) {
++            throw new RuntimeException("The reel cover could not be written to {$path}.");
++        }
 +
 +        return Storage::url($path);
 +    }
@@ -159,7 +163,7 @@ index 319ada9..8cb3bb8 100644
       * @return array{thumb_offset?: int}
       */
 diff --git a/app/Support/PostMediaRules.php b/app/Support/PostMediaRules.php
-index 91552d6..a2d5513 100644
+index 91552d6..e5625c3 100644
 --- a/app/Support/PostMediaRules.php
 +++ b/app/Support/PostMediaRules.php
 @@ -6,6 +6,7 @@
@@ -170,7 +174,7 @@ index 91552d6..a2d5513 100644
  use Illuminate\Validation\Rule;
  
  /**
-@@ -94,9 +95,27 @@ private static function metaRules(): array
+@@ -94,9 +95,29 @@ private static function metaRules(): array
              self::validateAltText(data_get($value, 'alt_text'), $fail);
              self::validateUserTags(data_get($value, 'user_tags'), $fail);
              self::validateCoverOffset(data_get($value, 'cover_offset_ms'), data_get($value, 'duration'), $fail);
@@ -189,8 +193,10 @@ index 91552d6..a2d5513 100644
 +        }
 +
 +        $base = Storage::url('covers/');
++        $name = is_string($url) && str_starts_with($url, $base) ? substr($url, strlen($base)) : '';
 +
-+        if (! is_string($url) || ! str_starts_with($url, $base) || preg_match('/^[\w-]+\.jpg$/', substr($url, strlen($base))) !== 1) {
++        // the file must be there now: Meta fetches it at publish time, and a missing one fails the whole post
++        if (preg_match('/^[\w-]+\.jpg$/', $name) !== 1 || ! Storage::exists('covers/'.$name)) {
 +            $fail('posts.errors.cover_url_invalid')->translate();
 +        }
 +    }
@@ -829,10 +835,10 @@ index d9083f9..52b03d5 100644
          ->middleware('throttle:media-imports')
 diff --git a/tests/Feature/Media/ReelCoverUrlTest.php b/tests/Feature/Media/ReelCoverUrlTest.php
 new file mode 100644
-index 0000000..be47575
+index 0000000..68cb3c9
 --- /dev/null
 +++ b/tests/Feature/Media/ReelCoverUrlTest.php
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,132 @@
 +<?php
 +
 +declare(strict_types=1);
@@ -870,6 +876,7 @@ index 0000000..be47575
 +    ]);
 +    $this->video = Media::factory()->video()->ownedByPost($this->post)->stored()->create(['meta' => ['duration' => 10]]);
 +    $this->post->update(['media' => [reelCoverItem($this->video, [])]]);
++    Storage::put('covers/a.jpg', 'jpeg');
 +    $this->cover = Storage::url('covers/a.jpg');
 +});
 +
@@ -947,6 +954,7 @@ index 0000000..be47575
 +    'another host' => ['https://evil.example/covers/x.jpg'],
 +    'another folder of this app' => [fn () => Storage::url('medias/x.jpg')],
 +    'a path walking out of covers' => [fn () => Storage::url('covers/../medias/x.jpg')],
++    'a cover file that does not exist' => [fn () => Storage::url('covers/missing.jpg')],
 +]);
 +
 +test('a duplicated post keeps the cover url', function () {
@@ -965,14 +973,15 @@ index 0000000..be47575
 +});
 diff --git a/tests/Feature/Media/StoreReelCoverTest.php b/tests/Feature/Media/StoreReelCoverTest.php
 new file mode 100644
-index 0000000..0d7a968
+index 0000000..e633c68
 --- /dev/null
 +++ b/tests/Feature/Media/StoreReelCoverTest.php
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,91 @@
 +<?php
 +
 +declare(strict_types=1);
 +
++use App\Actions\Media\StoreReelCover;
 +use App\Models\User;
 +use App\Models\Workspace;
 +use Illuminate\Http\UploadedFile;
@@ -1052,6 +1061,12 @@ index 0000000..0d7a968
 +        ->assertCreated()->json('url');
 +
 +    expect(storedCover($url))->toBe([1080, 1920, IMAGETYPE_JPEG]);
++});
++
++test('a cover the disk did not write is an error, never a url to a missing file', function () {
++    Storage::shouldReceive('put')->once()->andReturnFalse();
++
++    expect(fn () => StoreReelCover::execute(UploadedFile::fake()->image('c.png', 10, 10)))->toThrow(RuntimeException::class);
 +});
 diff --git a/tests/Feature/Services/Social/InstagramPublisherTest.php b/tests/Feature/Services/Social/InstagramPublisherTest.php
 index dd0a532..7d5ba0f 100644
