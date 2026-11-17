@@ -8,7 +8,7 @@ on:
         required: true
       suffix:
         description: sufixo da tag da imagem (patches locais em patches/)
-        default: -r2
+        default: -r3
         required: false
 jobs:
   # the tests the local patches add or touch, on the patched upstream, before any image is built

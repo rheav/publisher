@@ -4,10 +4,10 @@ TryPost self-hosted em `https://publisher.rheav.dev` (VPS, EasyPanel). Este repo
 
 Atualizar: `gh workflow run build-image.yml -f ref=vX.Y.Z` → trocar a tag da imagem no serviço `publisher/app` do EasyPanel → Deploy. Migrations rodam no boot.
 
-Patches locais em `patches/*.patch` são aplicados pelo workflow sobre o upstream (`git apply`, falha o build se não encaixar mais) e a imagem sai com sufixo (`-r2` por padrão): `gh workflow run build-image.yml -f ref=vX.Y.Z -f suffix=-r2` → tag `vX.Y.Z-r2`. Os patches entram em ordem de nome, e o job `tests` roda os testes que eles adicionam ou tocam antes do build. Hoje:
+Patches locais em `patches/*.patch` são aplicados pelo workflow sobre o upstream (`git apply`, falha o build se não encaixar mais) e a imagem sai com sufixo (`-r3` por padrão): `gh workflow run build-image.yml -f ref=vX.Y.Z -f suffix=-r3` → tag `vX.Y.Z-r3`. Os patches entram em ordem de nome, e o job `tests` roda os testes que eles adicionam ou tocam antes do build. Hoje:
 
 - `metrics-interval.patch` (desde `-r1`) cria `PUBLICATION_METRICS_INTERVAL_HOURS` (horas, 1-24; `24` = upstream, 03:00 UTC). Valor no env do EasyPanel: `24` (= original; o usuário voltou atrás em 2026-11-01 por volume de chamadas).
-- `reel-cover-image.patch` (desde `-r2`): capa própria do reel. A aba Capa do editor de mídia ganha "Imagem própria"; `POST /api/media/covers` (token de API, multipart `cover`) guarda um JPEG ≤ 1080×1920 em `covers/` e devolve `{url}`; a mídia de vídeo aceita `meta.cover_url` (só endereços de `covers/` deste TryPost) e o Instagram recebe `cover_url` no reel. Spec e plano em `docs/superpowers/`.
+- `reel-cover-image.patch` (desde `-r2`): capa própria do reel. A aba Capa do editor de mídia ganha "Imagem própria"; `POST /api/media/covers` (token de API, multipart `cover`) guarda um JPEG ≤ 1080×1920 em `covers/` e devolve `{url}`; a mídia de vídeo aceita `meta.cover_url` (só endereços de `covers/` deste TryPost) e o Instagram recebe `cover_url` no reel. Desde `-r3`, a aba mostra a imagem na hora, o progresso do envio ("Enviando… N%", depois "Processando a imagem…"), avisa acima de 20 MB e o Apply espera o envio. Spec e plano em `docs/superpowers/`.
 
 Para gerar um patch: clone do upstream na tag em `upstream/` (gitignored), o patch anterior aplicado e commitado como base, a mudança em commits por cima, `git -C upstream diff <base> > patches/<nome>.patch`.
 
